@@ -276,9 +276,10 @@ elif nav_choice == "🔍 Manifold Projections & Rules":
         st.subheader("PCA 2D Manifold Projection")
         from sklearn.decomposition import PCA
         pipeline = classifier.pipeline
+        raw_data = df_scored.drop(columns=["CLUSTER", "PERSONA"], errors="ignore")
         Z = pipeline.named_steps["scale"].transform(
             pipeline.named_steps["log"].transform(
-                pipeline.named_steps["prep"].transform(df_scored)
+                pipeline.named_steps["prep"].transform(raw_data)
             )
         )
         pca = PCA(n_components=2, random_state=42)
