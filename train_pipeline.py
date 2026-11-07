@@ -1,6 +1,6 @@
 """
 End-to-end training and serialization script for Credit Card Segmentation Pipeline.
-Generates models/cluster_pipeline.joblib and models/segment_metadata.json.
+Generates models/cluster_pipeline.joblib and models/segment_metadata.json based on 80% Train.
 """
 
 import json
@@ -8,6 +8,7 @@ import os
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
@@ -15,8 +16,8 @@ from sklearn.tree import DecisionTreeClassifier, export_text
 
 from src.features import CreditCardPreprocessor, Log1pTransformer
 
-PERSONAS_METADATA = {
-    0: {
+PERSONAS_BY_NAME = {
+    "Disciplined Transactors": {
         "name": "Disciplined Transactors",
         "tagline": "High Purchases, Negligible Balance, Full-Statement Payers",
         "description": "Cardholders who utilize their credit line strictly as an everyday payment mechanism. They exhibit very low revolving balances ($113 avg), high purchase frequency, near-zero cash advances, and pay in full at 3x the portfolio rate.",
@@ -33,7 +34,7 @@ PERSONAS_METADATA = {
         ],
         "primary_kpi": "Active spend per account & 90-day retention rate"
     },
-    1: {
+    "Active Lifestyle Revolvers": {
         "name": "Active Lifestyle Revolvers",
         "tagline": "Frequent Retail Spenders Carrying Balances (High Interest Margin)",
         "description": "Active, engaged consumers with the highest purchase volume ($1,584 avg) and strong frequency. They rarely take cash advances but carry ongoing balances ($1,508 avg) with low full-payment rates (3%), generating prime interest income.",
@@ -50,7 +51,7 @@ PERSONAS_METADATA = {
         ],
         "primary_kpi": "Revolving balance growth, delinquency rate (<30 DPD), and interest revenue"
     },
-    2: {
+    "Cash-Advance Borrowers": {
         "name": "Cash-Advance Borrowers",
         "tagline": "Emergency Liquidity Users, Negligible Purchase Activity",
         "description": "Customers who rarely use the card for retail shopping (Purchases avg $1.22, frequency ~0.0), but utilize the line as a short-term cash source ($1,971 avg cash advance, 27% cash frequency).",
@@ -67,7 +68,7 @@ PERSONAS_METADATA = {
         ],
         "primary_kpi": "Cash advance share reduction and 90+ DPD default rate"
     },
-    3: {
+    "Heavy Hybrid Borrowers": {
         "name": "Heavy Hybrid Borrowers",
         "tagline": "High-Limit, High-Balance, Dual-Usage Portfolio Drivers",
         "description": "Top-tier credit line holders ($5,242 avg limit) who heavily utilize both purchase facilities ($1,221 avg) and cash advances ($2,229 avg). They carry the largest average balance ($2,845) while also making the largest monthly payments ($2,478).",
@@ -87,10 +88,26 @@ PERSONAS_METADATA = {
 }
 
 
+def identify_persona(row):
+    """Dynamically matches centroid financial metrics to standardized persona name."""
+    if row['PRC_FULL_PAYMENT'] > 0.25 and row['BALANCE'] < 600:
+        return "Disciplined Transactors"
+    elif row['PURCHASES'] < 100 and row['CASH_ADVANCE'] > 1000:
+        return "Cash-Advance Borrowers"
+    elif row['PURCHASES'] > 1200 and row['CASH_ADVANCE'] < 300:
+        return "Active Lifestyle Revolvers"
+    else:
+        return "Heavy Hybrid Borrowers"
+
+
 def train_and_export():
     data_path = os.path.join("data", "CC GENERAL.csv")
     print(f"Loading data from {data_path}...")
     df = pd.read_csv(data_path)
+
+    # 80% Train / 20% Test Partition
+    train_df, test_df = train_test_split(df, test_size=0.20, random_state=42)
+    print(f"Partitioned into Train ({len(train_df):,} accounts, 80%) and Test ({len(test_df):,} accounts, 20%)")
 
     # 1. Pipeline construction
     preprocessor = CreditCardPreprocessor(clip_cash_freq=True)
@@ -105,10 +122,10 @@ def train_and_export():
         ("cluster", clusterer)
     ])
 
-    print("Fitting production pipeline...")
-    pipeline.fit(df)
-    labels = pipeline.predict(df)
-    df["CLUSTER"] = labels
+    print("Fitting production pipeline strictly on 80% Train set...")
+    pipeline.fit(train_df)
+    labels = pipeline.predict(train_df)
+    train_df["CLUSTER"] = labels
 
     # 2. Extract cluster profiles
     numeric_cols = [
@@ -119,12 +136,12 @@ def train_and_export():
         "CREDIT_LIMIT", "PAYMENTS", "MINIMUM_PAYMENTS", "PRC_FULL_PAYMENT", "TENURE"
     ]
 
-    cluster_means = df.groupby("CLUSTER")[numeric_cols].mean()
-    portfolio_mean = df[numeric_cols].mean()
+    cluster_means = train_df.groupby("CLUSTER")[numeric_cols].mean()
+    portfolio_mean = train_df[numeric_cols].mean()
     index_df = (cluster_means / portfolio_mean * 100).round(1)
 
-    cluster_counts = df["CLUSTER"].value_counts().to_dict()
-    total_records = len(df)
+    cluster_counts = train_df["CLUSTER"].value_counts().to_dict()
+    total_records = len(train_df)
 
     metadata = {
         "n_clusters": 4,
@@ -136,11 +153,13 @@ def train_and_export():
     for c_id in range(4):
         size = cluster_counts.get(c_id, 0)
         pct = round(size / total_records * 100, 2)
-        p_info = PERSONAS_METADATA.get(c_id, {})
+        row = cluster_means.loc[c_id]
+        persona_name = identify_persona(row)
+        p_info = PERSONAS_BY_NAME.get(persona_name, {})
 
         metadata["clusters"][c_id] = {
             "cluster_id": c_id,
-            "name": p_info.get("name", f"Cluster {c_id}"),
+            "name": p_info.get("name", persona_name),
             "tagline": p_info.get("tagline", ""),
             "description": p_info.get("description", ""),
             "financial_value": p_info.get("financial_value", ""),
@@ -156,7 +175,7 @@ def train_and_export():
 
     # 3. Fit a surrogate decision tree for explainability
     print("Fitting surrogate decision tree for rule extraction...")
-    X_eng = preprocessor.transform(df)
+    X_eng = preprocessor.transform(train_df)
     dt = DecisionTreeClassifier(max_depth=3, random_state=42)
     dt.fit(X_eng, labels)
     tree_rules = export_text(dt, feature_names=list(X_eng.columns))
@@ -176,13 +195,12 @@ def train_and_export():
         json.dump(metadata, f, indent=2)
     print(f"Saved metadata to {metadata_file}")
 
-    # Save a clean sample of baseline data for drift simulation
-    df.drop(columns=["CLUSTER"]).sample(n=1000, random_state=42).to_csv(baseline_file, index=False)
-    print(f"Saved baseline sample to {baseline_file}")
+    # Save holdout test sample for drift simulation
+    test_df.drop(columns=["CLUSTER"], errors="ignore").sample(n=min(1000, len(test_df)), random_state=42).to_csv(baseline_file, index=False)
+    print(f"Saved baseline sample from 20% test holdout to {baseline_file}")
 
     print("Training and serialization completed successfully!")
 
 
 if __name__ == "__main__":
     train_and_export()
-

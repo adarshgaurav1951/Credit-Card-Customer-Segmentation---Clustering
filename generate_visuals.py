@@ -4,6 +4,7 @@ Generates high-resolution visualization assets for GitHub documentation and repo
 
 import os
 import sys
+import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -24,25 +25,26 @@ print("Loading data...")
 df = pd.read_csv("data/CC GENERAL.csv")
 pipeline = joblib.load("models/cluster_pipeline.joblib")
 
-# Preprocessed & scaled matrices
+with open("models/segment_metadata.json") as f:
+    meta = json.load(f)
+cluster_names = {int(k): f"{k}: {v['name']}" for k, v in meta["clusters"].items()}
+
+# 80% Train / 20% Test Split
+from sklearn.model_selection import train_test_split
+train_df, test_df = train_test_split(df, test_size=0.20, random_state=42)
+
+# Preprocessed & scaled matrices on Train
 prep = pipeline.named_steps["prep"]
 log = pipeline.named_steps["log"]
 scale = pipeline.named_steps["scale"]
 km = pipeline.named_steps["cluster"]
 
-df_prep = prep.transform(df)
+df_prep = prep.transform(train_df)
 df_log = log.transform(df_prep)
 Z = scale.transform(df_log)
 labels = km.predict(Z)
-df["CLUSTER"] = labels
-
-cluster_names = {
-    0: "0: Disciplined Transactors",
-    1: "1: Active Lifestyle Revolvers",
-    2: "2: Cash-Advance Borrowers",
-    3: "3: Heavy Hybrid Borrowers"
-}
-df["PERSONA"] = df["CLUSTER"].map(cluster_names)
+train_df["CLUSTER"] = labels
+train_df["PERSONA"] = train_df["CLUSTER"].map(cluster_names)
 
 # -------------------------------------------------------------
 # 1. EDA Distributions
@@ -201,13 +203,13 @@ profile_cols = [
     'CASH_ADVANCE', 'CREDIT_LIMIT', 'PAYMENTS', 'MINIMUM_PAYMENTS',
     'PRC_FULL_PAYMENT', 'PURCHASES_FREQUENCY', 'CASH_ADVANCE_FREQUENCY', 'TENURE'
 ]
-cluster_means = df.groupby('PERSONA')[profile_cols].mean()
-overall_means = df[profile_cols].mean()
+cluster_means = train_df.groupby('PERSONA')[profile_cols].mean()
+overall_means = train_df[profile_cols].mean()
 index_table = (cluster_means / overall_means * 100).round(1)
 
 plt.figure(figsize=(15, 6), dpi=300)
 sns.heatmap(index_table, annot=True, fmt=".0f", cmap="vlag", center=100, linewidths=0.5, cbar_kws={'label': 'Index vs Portfolio Average (100 = Baseline)'})
-plt.title("Customer Segment Index Heatmap (100 = Portfolio Average)", fontsize=14, pad=12)
+plt.title("Customer Segment Index Heatmap (80% Train, 100 = Baseline)", fontsize=14, pad=12)
 plt.ylabel("Customer Persona", fontsize=12)
 plt.tight_layout()
 plt.savefig("assets/segment_index_heatmap.png", bbox_inches='tight')
@@ -260,20 +262,17 @@ plt.close()
 # 8. Surrogate Decision Tree Rules
 # -------------------------------------------------------------
 print("Generating 8. assets/surrogate_decision_tree.png...")
-X_explain = prep.transform(df.drop(columns=['CLUSTER', 'PERSONA'], errors='ignore'))
+X_explain = prep.transform(train_df.drop(columns=['CLUSTER', 'PERSONA'], errors='ignore'))
 dt = DecisionTreeClassifier(max_depth=3, random_state=RANDOM_STATE)
 dt.fit(X_explain, labels)
+
+tree_classes = [cluster_names[i].split(": ")[-1] for i in range(4)]
 
 plt.figure(figsize=(20, 9), dpi=300)
 plot_tree(
     dt,
     feature_names=list(X_explain.columns),
-    class_names=[
-        "0: Transactors",
-        "1: Revolvers",
-        "2: Cash Borrowers",
-        "3: Heavy Hybrid"
-    ],
+    class_names=tree_classes,
     filled=True,
     rounded=True,
     fontsize=10
@@ -288,13 +287,13 @@ plt.close()
 # -------------------------------------------------------------
 print("Generating 9. assets/portfolio_persona_distribution.png...")
 fig, ax = plt.subplots(figsize=(10, 5), dpi=300)
-counts = df['PERSONA'].value_counts()
+counts = train_df['PERSONA'].value_counts()
 bars = ax.barh(counts.index, counts.values, color=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728'], height=0.55)
 for bar in bars:
     w = bar.get_width()
-    ax.text(w + 30, bar.get_y() + bar.get_height()/2, f"{w:,} ({w/len(df)*100:.1f}%)", va='center', fontsize=11, fontweight='bold')
+    ax.text(w + 30, bar.get_y() + bar.get_height()/2, f"{w:,} ({w/len(train_df)*100:.1f}%)", va='center', fontsize=11, fontweight='bold')
 ax.set_xlim(0, max(counts.values) * 1.2)
-ax.set_title("Customer Distribution Across the 4 Discovered Personas", fontsize=14, pad=12)
+ax.set_title("Training Set Distribution Across the 4 Discovered Personas (N=7,160)", fontsize=14, pad=12)
 ax.set_xlabel("Number of Cardholders", fontsize=12)
 plt.tight_layout()
 plt.savefig("assets/portfolio_persona_distribution.png", bbox_inches='tight')
