@@ -482,6 +482,6 @@ elif nav_choice == "🛡️ Model Drift & Governance (PSI)":
         st.markdown("""
         - [x] **Fair Lending (ECOA):** Zero protected demographic classes utilized. Disparate impact audits required prior to line changes.
         - [x] **GDPR Article 22 Right of Explanation:** Depth-3 surrogate decision tree provides human-readable explanations with 95.6% fidelity.
-        - [x] **Drift Alert Architecture:** Real-time PSI tracking with automated alerts at $\ge 0.25$.
+        - [x] **Drift Alert Architecture:** Real-time PSI tracking with automated alerts at >= 0.25.
         """)
 
